@@ -1,0 +1,288 @@
+/*********
+  ESP32 Web Server: Real-time DHT Sensor + GPIO Control
+  Style: iOS Smart Home Glass Grid (SVG Gauges & iOS Toggle Switches)
+*********/
+
+#include "WiFi.h"
+#include "ESPAsyncWebServer.h"
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+
+const char* ssid = "ESP32_DHT_AP";
+const char* password = "XD0072535";
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+
+const int output26 = 26;
+const int output27 = 27;
+
+String output26State = "off";
+String output27State = "off";
+
+DHT dht(DHTPIN, DHTTYPE);
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+unsigned long lastTime = 0;
+unsigned long timerDelay = 2500;
+
+// โครงสร้างหน้าเว็บดีไซน์สไตล์ iOS / Apple HomeKit
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Home Hub</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #0b0e14; color: #ffffff; min-height: 100vh; padding: 20px 15px; }
+
+    /* Header */
+    .header { max-width: 460px; margin: 10px auto 25px; text-align: left; display: flex; justify-content: space-between; align-items: flex-end; }
+    .header h1 { font-size: 1.8rem; font-weight: 700; color: #ffffff; letter-spacing: -0.5px; }
+    .header p { font-size: 0.85rem; color: #8e8e93; }
+    .online-pill { background: rgba(52, 199, 89, 0.15); border: 1px solid rgba(52, 199, 89, 0.4); color: #34c759; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 20px; }
+
+    /* Container Grid */
+    .container { max-width: 460px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+    .full-width { grid-column: span 2; }
+
+    /* Glass Widget Cards */
+    .card { background: rgba(28, 28, 30, 0.75); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 22px; padding: 18px; position: relative; }
+    .card-label { font-size: 0.8rem; font-weight: 600; color: #8e8e93; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+
+    /* SVG Gauge Meter */
+    .gauge-container { position: relative; width: 110px; height: 110px; margin: 0 auto; }
+    .gauge-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+    .gauge-bg { fill: none; stroke: #2c2c2e; stroke-width: 8; }
+    .gauge-meter { fill: none; stroke-width: 8; stroke-linecap: round; stroke-dasharray: 283; stroke-dashoffset: 283; transition: stroke-dashoffset 0.8s ease; }
+    #temp_meter { stroke: #ff9f0a; }
+    #hum_meter { stroke: #64d2ff; }
+
+    .gauge-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+    .gauge-val { font-size: 1.6rem; font-weight: 700; color: #ffffff; line-height: 1; }
+    .gauge-unit { font-size: 0.75rem; color: #8e8e93; font-weight: 500; margin-top: 2px; }
+
+    /* Light Control Row with iOS Toggle */
+    .control-card { display: flex; align-items: center; justify-content: space-between; }
+    .control-info { text-align: left; }
+    .control-title { font-size: 1.05rem; font-weight: 600; color: #ffffff; }
+    .control-sub { font-size: 0.8rem; color: #8e8e93; margin-top: 2px; }
+
+    /* iOS Toggle Switch */
+    .switch { position: relative; display: inline-block; width: 52px; height: 32px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #39393d; transition: .3s; border-radius: 32px; }
+    .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; box-shadow: 0 3px 8px rgba(0,0,0,0.3); }
+    input:checked + .slider { background-color: #34c759; }
+    input:checked + .slider:before { transform: translateX(20px); }
+
+    /* Footer */
+    .footer { grid-column: span 2; text-align: center; font-size: 0.75rem; color: #636366; margin-top: 15px; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <h1>My Home</h1>
+      <p>ESP32 Control Center</p>
+    </div>
+    <div class="online-pill" id="ws_status">Connecting...</div>
+  </div>
+
+  <div class="container">
+    
+    <!-- Temperature Widget -->
+    <div class="card">
+      <div class="card-label">Temperature</div>
+      <div class="gauge-container">
+        <svg class="gauge-svg" viewBox="0 0 100 100">
+          <circle class="gauge-bg" cx="50" cy="50" r="45"/>
+          <circle class="gauge-meter" id="temp_meter" cx="50" cy="50" r="45"/>
+        </svg>
+        <div class="gauge-text">
+          <div class="gauge-val" id="temperature">--</div>
+          <div class="gauge-unit">&deg;C</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Humidity Widget -->
+    <div class="card">
+      <div class="card-label">Humidity</div>
+      <div class="gauge-container">
+        <svg class="gauge-svg" viewBox="0 0 100 100">
+          <circle class="gauge-bg" cx="50" cy="50" r="45"/>
+          <circle class="gauge-meter" id="hum_meter" cx="50" cy="50" r="45"/>
+        </svg>
+        <div class="gauge-text">
+          <div class="gauge-val" id="humidity">--</div>
+          <div class="gauge-unit">% RH</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Light 1 Control -->
+    <div class="card full-width control-card">
+      <div class="control-info">
+        <div class="control-title">Light 1</div>
+        <div class="control-sub">GPIO 26 &bull; <span id="state26">OFF</span></div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="chk26" onchange="togglePin(26)">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <!-- Light 2 Control -->
+    <div class="card full-width control-card">
+      <div class="control-info">
+        <div class="control-title">Light 2</div>
+        <div class="control-sub">GPIO 27 &bull; <span id="state27">OFF</span></div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="chk27" onchange="togglePin(27)">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="footer">
+      ESP32 Offline Access Point Mode
+    </div>
+
+  </div>
+
+<script>
+  var gateway = `ws://${window.location.hostname}/ws`;
+  if (!window.location.hostname) gateway = 'ws://192.168.4.1/ws';
+  var websocket;
+
+  function initWebSocket() {
+    websocket = new WebSocket(gateway);
+    websocket.onopen = function() {
+      document.getElementById('ws_status').innerHTML = "Live";
+      document.getElementById('ws_status').style.color = "#34c759";
+    };
+    websocket.onclose = function() {
+      document.getElementById('ws_status').innerHTML = "Offline";
+      document.getElementById('ws_status').style.color = "#ff3b30";
+      setTimeout(initWebSocket, 2000);
+    };
+    websocket.onmessage = onMessage;
+  }
+
+  function setGauge(meterId, val, maxVal) {
+    var circumference = 283;
+    var progress = val / maxVal;
+    if (progress > 1) progress = 1;
+    if (progress < 0) progress = 0;
+    var offset = circumference - (progress * circumference);
+    document.getElementById(meterId).style.strokeDashoffset = offset;
+  }
+
+  function onMessage(event) {
+    var data = JSON.parse(event.data);
+    if (data.temperature !== undefined) {
+      document.getElementById('temperature').innerHTML = data.temperature;
+      setGauge('temp_meter', parseFloat(data.temperature), 50);
+    }
+    if (data.humidity !== undefined) {
+      document.getElementById('humidity').innerHTML = data.humidity;
+      setGauge('hum_meter', parseFloat(data.humidity), 100);
+    }
+    if (data.state26 !== undefined) updateUI(26, data.state26);
+    if (data.state27 !== undefined) updateUI(27, data.state27);
+  }
+
+  function updateUI(pin, state) {
+    var chk = document.getElementById('chk' + pin);
+    var txt = document.getElementById('state' + pin);
+    if (state === 'on') {
+      chk.checked = true;
+      txt.innerHTML = 'ON';
+      txt.style.color = '#34c759';
+    } else {
+      chk.checked = false;
+      txt.innerHTML = 'OFF';
+      txt.style.color = '#8e8e93';
+    }
+  }
+
+  function togglePin(pin) {
+    fetch('/toggle?pin=' + pin);
+  }
+
+  window.addEventListener('load', initWebSocket);
+</script>
+</body>
+</html>
+)rawliteral";
+
+void notifyClients() {
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+  String jsonString = "{";
+  if (!isnan(t)) jsonString += "\"temperature\":\"" + String(t, 1) + "\",";
+  if (!isnan(h)) jsonString += "\"humidity\":\"" + String(h, 1) + "\",";
+  jsonString += "\"state26\":\"" + output26State + "\",";
+  jsonString += "\"state27\":\"" + output27State + "\"";
+  jsonString += "}";
+
+  ws.textAll(jsonString);
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    notifyClients();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(output26, OUTPUT);
+  pinMode(output27, OUTPUT);
+  digitalWrite(output26, LOW);
+  digitalWrite(output27, LOW);
+
+  dht.begin();
+
+  WiFi.softAP(ssid, password);
+
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("pin")) {
+      String pin = request->getParam("pin")->value();
+      if (pin == "26") {
+        output26State = (output26State == "off") ? "on" : "off";
+        digitalWrite(output26, (output26State == "on") ? HIGH : LOW);
+      } else if (pin == "27") {
+        output27State = (output27State == "off") ? "on" : "off";
+        digitalWrite(output27, (output27State == "on") ? HIGH : LOW);
+      }
+      notifyClients();
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.begin();
+}
+
+void loop() {
+  if ((millis() - lastTime) > timerDelay) {
+    notifyClients();
+    lastTime = millis();
+  }
+  ws.cleanupClients();
+}
